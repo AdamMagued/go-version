@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"sort"
 	"testing"
 )
 
@@ -178,6 +179,14 @@ func TestVersionCompare(t *testing.T) {
 		{"1.7rc2", "1.7rc1", 1},
 		{"1.7rc2", "1.7", -1},
 		{"1.2.0", "1.2.0-X-1.2.0+metadata~dist", 1},
+		{"1.0.0-alpha", "1.0.0", -1},
+		{"1.0.0", "1.0.0.0", 0},
+		{"1.0.0-alpha", "1.0.0.0", -1},
+		{"1.0.0.0", "1.0.0-alpha", 1},
+		{"1.0.0.0-rc", "1.0.0", -1},
+		{"1.0.0", "1.0.0.0-rc", 1},
+		{"1.0.0-alpha", "1.0.0.0-beta", -1},
+		{"1.0.0.0-beta", "1.0.0-alpha", 1},
 	}
 
 	for _, tc := range cases {
@@ -915,5 +924,59 @@ func BenchmarkVersionCompareV2(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		v.Compare(o)
+	}
+}
+
+func TestComparePrereleaseAcrossSegmentLengths(t *testing.T) {
+	cases := []struct {
+		v1, v2 string
+		want   int
+	}{
+		{"1.0.0-alpha", "1.0.0", -1},
+		{"1.0.0", "1.0.0.0", 0},
+		{"1.0.0-alpha", "1.0.0.0", -1},
+		{"1.0.0.0-rc", "1.0.0", -1},
+		{"1.0.0.0", "1.0.0-alpha", 1},
+		{"1.0.0", "1.0.0.0-rc", 1},
+		{"1.0.0-alpha", "1.0.0-beta", -1},
+		{"1.0.0.0-alpha", "1.0.0-beta", -1},
+		{"1.0.0-beta", "1.0.0.0-alpha", 1},
+	}
+	for _, tc := range cases {
+		a := Must(NewVersion(tc.v1))
+		b := Must(NewVersion(tc.v2))
+		if got := a.Compare(b); got != tc.want {
+			t.Fatalf("Compare(%s, %s) = %d, want %d", tc.v1, tc.v2, got, tc.want)
+		}
+		if got := b.Compare(a); got != -tc.want {
+			t.Fatalf("Compare(%s, %s) = %d, want %d", tc.v2, tc.v1, got, -tc.want)
+		}
+	}
+
+	alpha := Must(NewVersion("1.0.0-alpha"))
+	for _, cStr := range []string{"= 1.0.0", "= 1.0.0.0"} {
+		cs := MustConstraints(NewConstraint(cStr))
+		if cs.Check(alpha) {
+			t.Fatalf("%q should not match 1.0.0-alpha", cStr)
+		}
+	}
+
+	notEq := MustConstraints(NewConstraint("!= 1.0.0.0"))
+	if !notEq.Check(alpha) {
+		t.Fatalf("!= 1.0.0.0 should match 1.0.0-alpha")
+	}
+
+	var col Collection
+	for _, s := range []string{"1.0.0.0", "1.0.0-alpha", "1.0.0", "1.0.0-beta", "1.0.0.0-rc"} {
+		col = append(col, Must(NewVersion(s)))
+	}
+	sort.Sort(col)
+	for i, v := range col {
+		if i < 3 && v.Prerelease() == "" {
+			t.Fatalf("expected prerelease at index %d, got %s", i, v)
+		}
+		if i >= 3 && v.Prerelease() != "" {
+			t.Fatalf("expected release version at index %d, got %s", i, v)
+		}
 	}
 }

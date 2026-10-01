@@ -81,6 +81,10 @@ func TestConstraintCheck(t *testing.T) {
 		{">= 2.1.0-a", "2.1.1-beta", false},
 		{">= 2.1.0-a", "2.1.0", true},
 		{"<= 2.1.0-a", "2.0.0", true},
+		{"= 1.0.0.0", "1.0.0-alpha", false},
+		{"!= 1.0.0.0", "1.0.0-alpha", true},
+		{"= 1.0.0", "1.0.0.0-rc", false},
+		{"!= 1.0.0", "1.0.0.0-rc", true},
 	}
 
 	for _, tc := range cases {
