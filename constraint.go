@@ -5,15 +5,19 @@ package version
 
 import (
 	"fmt"
+	"math"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 )
 
 var (
-	constraintRegexp     *regexp.Regexp
-	constraintRegexpOnce sync.Once
+	constraintRegexp             *regexp.Regexp
+	constraintRegexpOnce         sync.Once
+	constraintWildcardRegexp     *regexp.Regexp
+	constraintWildcardRegexpOnce sync.Once
 )
 
 func getConstraintRegexp() *regexp.Regexp {
@@ -28,17 +32,32 @@ func getConstraintRegexp() *regexp.Regexp {
 	return constraintRegexp
 }
 
+func getConstraintWildcardRegexp() *regexp.Regexp {
+	constraintWildcardRegexpOnce.Do(func() {
+		constraintWildcardRegexp = regexp.MustCompile(fmt.Sprintf(
+			`^\s*(%s)\s*v?((?:[0-9]+(?:\.[0-9]+)*\.(?:[xX*](?:\.[xX*])*))|[xX*](?:\.[xX*])*)\s*$`,
+			`<=|>=|!=|~>|<|>|=|`,
+		))
+	})
+	return constraintWildcardRegexp
+}
+
 // Constraint represents a single constraint for a version, such as
 // ">= 1.0".
 type Constraint struct {
-	f        constraintFunc
-	op       operator
-	check    *Version
-	original string
+	f           constraintFunc
+	op          operator
+	check       *Version
+	original    string
+	hasWildcard bool
+	wildcardLen int
 }
 
 func (c *Constraint) Equals(con *Constraint) bool {
-	return c.op == con.op && c.check.Equal(con.check)
+	return c.op == con.op &&
+		c.hasWildcard == con.hasWildcard &&
+		c.wildcardLen == con.wildcardLen &&
+		c.check.Equal(con.check)
 }
 
 // Constraints is a slice of constraints. We make a custom type so that
@@ -134,7 +153,15 @@ func (cs Constraints) Less(i, j int) bool {
 		return false
 	}
 
-	return cs[i].check.LessThan(cs[j].check)
+	if !cs[i].check.Equal(cs[j].check) {
+		return cs[i].check.LessThan(cs[j].check)
+	}
+
+	if cs[i].hasWildcard != cs[j].hasWildcard {
+		return !cs[i].hasWildcard && cs[j].hasWildcard
+	}
+
+	return cs[i].wildcardLen < cs[j].wildcardLen
 }
 
 func (cs Constraints) Swap(i, j int) {
@@ -167,6 +194,10 @@ func (c *Constraint) String() string {
 }
 
 func parseSingle(v string) (*Constraint, error) {
+	if matches := getConstraintWildcardRegexp().FindStringSubmatch(v); matches != nil {
+		return parseWildcardConstraint(v, matches)
+	}
+
 	matches := getConstraintRegexp().FindStringSubmatch(v)
 	if matches == nil {
 		return nil, fmt.Errorf("malformed constraint: %s", v)
@@ -203,6 +234,150 @@ func parseSingle(v string) (*Constraint, error) {
 		check:    check,
 		original: v,
 	}, nil
+}
+
+func parseWildcardConstraint(v string, matches []string) (*Constraint, error) {
+	parts := strings.Split(matches[2], ".")
+	var prefix []int64
+	for _, part := range parts {
+		if part == "*" || part == "x" || part == "X" {
+			break
+		}
+		val, err := strconv.ParseInt(part, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("error parsing version: %s", err)
+		}
+		prefix = append(prefix, val)
+	}
+
+	minSegs := make([]int64, len(prefix))
+	copy(minSegs, prefix)
+	for len(minSegs) < 3 {
+		minSegs = append(minSegs, 0)
+	}
+	minSegStrs := make([]string, len(minSegs))
+	for i, s := range minSegs {
+		minSegStrs[i] = strconv.FormatInt(s, 10)
+	}
+	minVersion, err := NewVersion(strings.Join(minSegStrs, "."))
+	if err != nil {
+		return nil, err
+	}
+
+	var nextVersion *Version
+	if len(prefix) > 0 {
+		nextSegs := make([]int64, len(prefix))
+		copy(nextSegs, prefix)
+		if nextSegs[len(nextSegs)-1] < math.MaxInt64 {
+			nextSegs[len(nextSegs)-1]++
+		}
+		for len(nextSegs) < 3 {
+			nextSegs = append(nextSegs, 0)
+		}
+		nextSegStrs := make([]string, len(nextSegs))
+		for i, s := range nextSegs {
+			nextSegStrs[i] = strconv.FormatInt(s, 10)
+		}
+		nextVersion, err = NewVersion(strings.Join(nextSegStrs, "."))
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	var cop constraintOperation
+	switch matches[1] {
+	case "=":
+		cop = constraintOperation{
+			op: equal,
+			f: func(v, c *Version) bool {
+				return prereleaseCheck(v, minVersion) && matchesPrefix(v, prefix)
+			},
+		}
+	case "!=":
+		cop = constraintOperation{
+			op: notEqual,
+			f: func(v, c *Version) bool {
+				return !matchesPrefix(v, prefix)
+			},
+		}
+	case ">":
+		cop = constraintOperation{
+			op: greaterThan,
+			f: func(v, c *Version) bool {
+				if len(prefix) == 0 {
+					return false
+				}
+				return prereleaseCheck(v, nextVersion) && v.Compare(nextVersion) >= 0
+			},
+		}
+	case "<":
+		cop = constraintOperation{
+			op: lessThan,
+			f: func(v, c *Version) bool {
+				if len(prefix) == 0 {
+					return false
+				}
+				return prereleaseCheck(v, minVersion) && v.Compare(minVersion) < 0
+			},
+		}
+	case ">=":
+		cop = constraintOperation{
+			op: greaterThanEqual,
+			f: func(v, c *Version) bool {
+				return prereleaseCheck(v, minVersion) && v.Compare(minVersion) >= 0
+			},
+		}
+	case "<=":
+		cop = constraintOperation{
+			op: lessThanEqual,
+			f: func(v, c *Version) bool {
+				if len(prefix) == 0 {
+					return prereleaseCheck(v, minVersion)
+				}
+				return prereleaseCheck(v, nextVersion) && v.Compare(nextVersion) < 0
+			},
+		}
+	case "~>":
+		cop = constraintOperation{
+			op: pessimistic,
+			f: func(v, c *Version) bool {
+				return prereleaseCheck(v, minVersion) && matchesPrefix(v, prefix)
+			},
+		}
+	default:
+		cop = constraintOperation{
+			op: equal,
+			f: func(v, c *Version) bool {
+				return prereleaseCheck(v, minVersion) && matchesPrefix(v, prefix)
+			},
+		}
+	}
+
+	return &Constraint{
+		f:           cop.f,
+		op:          cop.op,
+		check:       minVersion,
+		original:    v,
+		hasWildcard: true,
+		wildcardLen: len(prefix),
+	}, nil
+}
+
+func matchesPrefix(v *Version, prefix []int64) bool {
+	if len(prefix) == 0 {
+		return true
+	}
+	vSegs := v.Segments64()
+	for i, p := range prefix {
+		var vSeg int64
+		if i < len(vSegs) {
+			vSeg = vSegs[i]
+		}
+		if vSeg != p {
+			return false
+		}
+	}
+	return true
 }
 
 func prereleaseCheck(v, c *Version) bool {
