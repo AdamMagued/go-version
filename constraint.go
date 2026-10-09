@@ -289,7 +289,16 @@ func constraintPessimistic(v, c *Version) bool {
 	// Check the segments in the constraint against those in the version. If the version
 	// being checked, at any point, does not have the same values in each index of the
 	// constraints segments, then it cannot be valid against the constraint.
-	for i := 0; i < c.si-1; i++ {
+	//
+	// For multi-segment constraints (e.g., ~> 1.2 or ~> 1.2.3), the last specified
+	// segment is allowed to increment, so all segments prior to it must match.
+	// For single-segment constraints (e.g., ~> 18), the upper bound is the next
+	// major version (< 19.0.0), so the major segment itself must match.
+	segmentsToCheck := c.si - 1
+	if segmentsToCheck <= 0 {
+		segmentsToCheck = 1
+	}
+	for i := 0; i < segmentsToCheck; i++ {
 		if v.segments[i] != c.segments[i] {
 			return false
 		}

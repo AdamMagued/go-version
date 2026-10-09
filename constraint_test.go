@@ -18,6 +18,7 @@ func TestNewConstraint(t *testing.T) {
 	}{
 		{">= 1.2", 1, false},
 		{"1.0", 1, false},
+		{"~> 18", 1, false},
 		{">= 1.x", 0, true},
 		{">= 1.2, < 1.0", 2, false},
 
@@ -81,6 +82,25 @@ func TestConstraintCheck(t *testing.T) {
 		{">= 2.1.0-a", "2.1.1-beta", false},
 		{">= 2.1.0-a", "2.1.0", true},
 		{"<= 2.1.0-a", "2.0.0", true},
+		{"~> 18", "18.0.0", true},
+		{"~> 18", "18.0", true},
+		{"~> 18", "18", true},
+		{"~> 18", "18.1.0", true},
+		{"~> 18", "18.99.99", true},
+		{"~> 18", "19.0.0", false},
+		{"~> 18", "19.0", false},
+		{"~> 18", "19", false},
+		{"~> 18", "19.1.0", false},
+		{"~> 18", "17.9.9", false},
+		{"~> 18", "18.0.0-beta", false},
+		{"~> 18", "19.0.0-alpha", false},
+		{"~> 0", "0.0.0", true},
+		{"~> 0", "0.5.2", true},
+		{"~> 0", "1.0.0", false},
+		{"~> 1", "1.0.0", true},
+		{"~> 1", "1.9.0", true},
+		{"~> 1", "2.0.0", false},
+		{"~> 1", "0.9.9", false},
 	}
 
 	for _, tc := range cases {
@@ -236,6 +256,7 @@ func TestConstraintsString(t *testing.T) {
 	}{
 		{">= 1.0, < 1.2", ""},
 		{"~> 1.0.7", ""},
+		{"~> 18", ""},
 	}
 
 	for _, tc := range cases {
