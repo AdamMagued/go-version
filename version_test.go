@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"sort"
 	"testing"
 )
 
@@ -915,5 +916,78 @@ func BenchmarkVersionCompareV2(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		v.Compare(o)
+	}
+}
+
+func TestComparePrereleaseAcrossSegmentLengths(t *testing.T) {
+	cases := []struct {
+		v1   string
+		v2   string
+		want int
+	}{
+		{"1.0.0-alpha", "1.0.0", -1},
+		{"1.0.0", "1.0.0.0", 0},
+		{"1.0.0-alpha", "1.0.0.0", -1},
+		{"1.0.0.0-rc", "1.0.0", -1},
+		{"1.0.0.0", "1.0.0-alpha", 1},
+		{"1.0.0-alpha", "1.0.0-beta", -1},
+		{"1.0.0.0-alpha", "1.0.0-beta", -1},
+		{"1.0.0-alpha", "1.0.0.0-alpha", 0},
+		{"1.0.0.0.0-alpha", "1.0.0", -1},
+		{"1.0.0.0.0-rc.2", "1.0.0.0-rc.1", 1},
+		{"1.0.0.1-alpha", "1.0.0", 1},
+		{"1.0.0-beta", "1.0.0.1-alpha", -1},
+	}
+
+	for _, tc := range cases {
+		a := Must(NewVersion(tc.v1))
+		b := Must(NewVersion(tc.v2))
+
+		if got := a.Compare(b); got != tc.want {
+			t.Fatalf("Compare(%s, %s) = %d, want %d", tc.v1, tc.v2, got, tc.want)
+		}
+		if got := b.Compare(a); got != -tc.want {
+			t.Fatalf("Compare(%s, %s) = %d, want %d", tc.v2, tc.v1, got, -tc.want)
+		}
+	}
+
+	// Transitivity check: 1.0.0-alpha < 1.0.0 and 1.0.0 == 1.0.0.0 => 1.0.0-alpha < 1.0.0.0
+	alpha := Must(NewVersion("1.0.0-alpha"))
+	v3 := Must(NewVersion("1.0.0"))
+	v4 := Must(NewVersion("1.0.0.0"))
+	if !alpha.LessThan(v3) || !v3.Equal(v4) || !alpha.LessThan(v4) {
+		t.Fatalf("transitivity failed: alpha < v3 (%t), v3 == v4 (%t), alpha < v4 (%t)",
+			alpha.LessThan(v3), v3.Equal(v4), alpha.LessThan(v4))
+	}
+
+	// Constraint checks
+	eq4 := MustConstraints(NewConstraint("= 1.0.0.0"))
+	if eq4.Check(alpha) {
+		t.Fatalf("= 1.0.0.0 should not match 1.0.0-alpha")
+	}
+
+	neq4 := MustConstraints(NewConstraint("!= 1.0.0.0"))
+	if !neq4.Check(alpha) {
+		t.Fatalf("!= 1.0.0.0 should match 1.0.0-alpha")
+	}
+
+	// Collection sorting check
+	var col Collection
+	for _, s := range []string{"1.0.0.0", "1.0.0-alpha", "1.0.0", "1.0.0-beta", "1.0.0.0-rc"} {
+		col = append(col, Must(NewVersion(s)))
+	}
+	sort.Sort(col)
+
+	// Pre-releases must precede standard releases
+	expectedOrder := []string{"1.0.0-alpha", "1.0.0-beta", "1.0.0.0-rc"}
+	for i, exp := range expectedOrder {
+		if col[i].String() != exp {
+			t.Fatalf("col[%d] = %s, want %s", i, col[i].String(), exp)
+		}
+	}
+	for i := 3; i < 5; i++ {
+		if !col[i].Equal(v3) {
+			t.Fatalf("col[%d] = %s, expected to equal 1.0.0", i, col[i].String())
+		}
 	}
 }
